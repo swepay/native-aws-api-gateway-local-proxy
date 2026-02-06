@@ -1,0 +1,34 @@
+# Binários
+proxy
+proxy.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Output de testes
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Diretórios de dependência
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporários
+tmp/
+temp/

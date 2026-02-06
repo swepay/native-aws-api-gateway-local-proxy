@@ -1,0 +1,129 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GitHub Actions - Release
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Triggers:
+#   - Tags v*.*.* (cria release com binários)
+#
+# Cria release com:
+#   - Binários para Linux (amd64, arm64)
+#   - Binários para macOS (amd64, arm64)
+#   - Binário para Windows (amd64)
+#   - Checksums SHA256
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          COMMIT=${{ github.sha }}
+          LDFLAGS="-w -s -X main.version=${VERSION} -X main.commit=${COMMIT}"
+          
+          # Linux AMD64
+          echo "Building linux/amd64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/proxy-linux-amd64 main.go
+          
+          # Linux ARM64
+          echo "Building linux/arm64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/proxy-linux-arm64 main.go
+          
+          # macOS AMD64
+          echo "Building darwin/amd64..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/proxy-darwin-amd64 main.go
+          
+          # macOS ARM64 (Apple Silicon)
+          echo "Building darwin/arm64..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/proxy-darwin-arm64 main.go
+          
+          # Windows AMD64
+          echo "Building windows/amd64..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/proxy-windows-amd64.exe main.go
+          
+          echo "All binaries built successfully!"
+          ls -la dist/
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          generate_release_notes: true
+          files: |
+            dist/proxy-linux-amd64
+            dist/proxy-linux-arm64
+            dist/proxy-darwin-amd64
+            dist/proxy-darwin-arm64
+            dist/proxy-windows-amd64.exe
+            dist/checksums.txt
+          body: |
+            ## AWS API Gateway HTTP API v2 Local Proxy - ${{ steps.version.outputs.VERSION }}
+            
+            ### Docker Image
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            ```
+            
+            ### Binary Downloads
+            | Platform | Architecture | Binary |
+            |----------|--------------|--------|
+            | Linux | AMD64 | `proxy-linux-amd64` |
+            | Linux | ARM64 | `proxy-linux-arm64` |
+            | macOS | AMD64 (Intel) | `proxy-darwin-amd64` |
+            | macOS | ARM64 (Apple Silicon) | `proxy-darwin-arm64` |
+            | Windows | AMD64 | `proxy-windows-amd64.exe` |
+            
+            ### Checksums
+            See `checksums.txt` for SHA256 checksums of all binaries.
+            
+            ### Quick Start
+            ```bash
+            # Download (Linux AMD64 example)
+            curl -L -o proxy https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/proxy-linux-amd64
+            chmod +x proxy
+            
+            # Run
+            LAMBDA_INVOKE_URL=http://localhost:9000/2015-03-31/functions/function/invocations \
+            ROUTE_TEMPLATE="/api/{resource}" \
+            ./proxy
+            ```

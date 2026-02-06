@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Docker Compose - Stack Completa para Desenvolvimento Local
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# Inclui:
+# - API Gateway Local Proxy
+# - Lambda (exemplo usando imagem aws-lambda-rie)
+#
+# Uso:
+#   docker-compose up -d
+#   curl http://localhost:3000/identity/v1/realms/master/protocol/openid-connect/token
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # API Gateway HTTP API v2 Local Proxy
+  # ─────────────────────────────────────────────────────────────────────────────
+  api-gateway-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api-gateway-proxy
+    ports:
+      - "3000:3000"
+    environment:
+      # URL da Lambda local (container name como hostname)
+      - LAMBDA_INVOKE_URL=http://lambda:8080/2015-03-31/functions/function/invocations
+      # Template de rota para extrair path parameters
+      - ROUTE_TEMPLATE=/identity/v1/realms/{realm}/protocol/openid-connect/token
+      # Configurações do API Gateway
+      - STAGE=$default
+      - ACCOUNT_ID=123456789012
+      - API_ID=local-dev
+      - LISTEN_ADDR=:3000
+      # Habilitar debug para ver eventos gerados
+      - DEBUG=true
+    depends_on:
+      - lambda
+    networks:
+      - proxy-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Lambda Mock (exemplo - substitua pela sua Lambda real)
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Este é um placeholder. Para usar com sua Lambda real:
+  # 
+  # Opção 1: Lambda Python/Node.js com RIE
+  #   docker run -p 9000:8080 \
+  #     -v ~/.aws-lambda-rie:/aws-lambda \
+  #     -v $(pwd)/lambda:/var/task \
+  #     public.ecr.aws/lambda/python:3.11 \
+  #     app.handler
+  #
+  # Opção 2: Lambda Go nativa
+  #   docker run -p 9000:8080 \
+  #     -v $(pwd)/bootstrap:/var/task/bootstrap \
+  #     public.ecr.aws/lambda/provided:al2
+  #
+  # Para este exemplo, usamos uma Lambda mock simples que ecoa a requisição
+  # ─────────────────────────────────────────────────────────────────────────────
+  lambda:
+    image: public.ecr.aws/lambda/python:3.11
+    container_name: lambda-mock
+    ports:
+      - "9000:8080"
+    volumes:
+      - ./lambda-mock:/var/task:ro
+    command: app.handler
+    networks:
+      - proxy-network
+
+networks:
+  proxy-network:
+    driver: bridge

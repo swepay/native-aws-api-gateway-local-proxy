@@ -1,0 +1,178 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GitHub Actions - Build e Publish Docker Image para GitHub Container Registry
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Triggers:
+#   - Push para main/master (publish latest)
+#   - Tags v*.*.* (publish versão específica)
+#   - Pull Requests (apenas build, sem publish)
+#
+# Imagens publicadas em: ghcr.io/<owner>/native-aws-api-gateway-local-proxy
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Build and Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job: Test
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.txt ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.txt
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job: Build and Publish
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Setup Docker Buildx para multi-platform builds
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Login no GitHub Container Registry
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Extrair metadata (tags, labels) para Docker
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag "latest" para branch main/master
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Tag com versão semântica (v1.0.0 -> 1.0.0)
+            type=semver,pattern={{version}}
+            # Tag major.minor (v1.0.0 -> 1.0)
+            type=semver,pattern={{major}}.{{minor}}
+            # Tag major (v1.0.0 -> 1)
+            type=semver,pattern={{major}}
+            # Tag com SHA do commit
+            type=sha,prefix=sha-
+            # Tag com nome da branch
+            type=ref,event=branch
+            # Tag com nome da PR
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=AWS API Gateway HTTP API v2 Local Proxy
+            org.opencontainers.image.description=Local proxy that simulates AWS API Gateway HTTP API v2 behavior
+            org.opencontainers.image.vendor=SwePay
+            org.opencontainers.image.licenses=MIT
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Build e Push da imagem (multi-platform: amd64 + arm64)
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Gerar attestation para supply chain security
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Generate artifact attestation
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Output summary
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Image digest
+        run: echo ${{ steps.push.outputs.digest }}
+
+      - name: Summary
+        run: |
+          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** \`${{ env.REGISTRY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Command" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
