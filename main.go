@@ -499,14 +499,14 @@ func (p *MultiRouteProxy) writeResponse(w http.ResponseWriter, resp *LambdaRespo
 
 	// Escrever body
 	if resp.Body != "" {
-		w.Write([]byte(resp.Body))
+		_, _ = w.Write([]byte(resp.Body))
 	}
 }
 
 func (p *MultiRouteProxy) writeError(w http.ResponseWriter, statusCode int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": message,
 	})
 }
@@ -677,7 +677,7 @@ func main() {
 			}
 		}
 		
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":      "healthy",
 			"proxy":       "aws-api-gateway-v2-local",
 			"routeCount":  len(config.Routes),
