@@ -323,7 +323,7 @@ func (p *MultiRouteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Debug: imprimir resposta da Lambda
 	if p.config.Debug {
-		log.Printf("📨 LAMBDA RESPONSE [%s]: StatusCode=%d, Body=%s\n", 
+		log.Printf("📨 LAMBDA RESPONSE [%s]: StatusCode=%d, Body=%s\n",
 			handler.route.Name, lambdaResp.StatusCode, lambdaResp.Body)
 	}
 
@@ -667,7 +667,7 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		
+
 		routeNames := make([]string, len(config.Routes))
 		for i, route := range config.Routes {
 			if route.Name != "" {
@@ -676,12 +676,12 @@ func main() {
 				routeNames[i] = route.PathPrefix
 			}
 		}
-		
+
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":      "healthy",
-			"proxy":       "aws-api-gateway-v2-local",
-			"routeCount":  len(config.Routes),
-			"routes":      routeNames,
+			"status":     "healthy",
+			"proxy":      "aws-api-gateway-v2-local",
+			"routeCount": len(config.Routes),
+			"routes":     routeNames,
 		})
 	})
 

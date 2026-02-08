@@ -452,7 +452,7 @@ func TestMultiRouteProxy_Integration(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer mockLambda.Close()
 
@@ -500,7 +500,7 @@ func TestMultiRouteProxy_MultiLambdaIntegration(t *testing.T) {
 			Body:       `{"service": "identity"}`,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer identityLambda.Close()
 
@@ -511,7 +511,7 @@ func TestMultiRouteProxy_MultiLambdaIntegration(t *testing.T) {
 			Body:       `{"service": "admin"}`,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer adminLambda.Close()
 
