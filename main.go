@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -21,26 +22,134 @@ import (
 // CONFIGURAÇÃO
 // ════════════════════════════════════════════════════════════════════════════════
 
+// Config representa a configuração global do proxy
 type Config struct {
-	LambdaInvokeURL string
-	RouteTemplate   string
-	Stage           string
-	AccountID       string
-	ApiID           string
-	ListenAddr      string
-	Debug           bool
+	Stage      string
+	AccountID  string
+	ApiID      string
+	ListenAddr string
+	Debug      bool
+	Routes     []RouteConfig
+}
+
+// RouteConfig representa uma rota individual com sua Lambda associada
+type RouteConfig struct {
+	// PathPrefix é o prefixo do path que esta rota atende (ex: "/identity", "/admin")
+	PathPrefix string `json:"pathPrefix"`
+	// RouteTemplate é o template completo da rota para extração de path params
+	RouteTemplate string `json:"routeTemplate"`
+	// LambdaURL é a URL do endpoint de invocação da Lambda
+	LambdaURL string `json:"lambdaUrl"`
+	// Name é um nome amigável para a rota (opcional, para logs)
+	Name string `json:"name,omitempty"`
+}
+
+// RoutesConfig é o formato do arquivo JSON de configuração de rotas
+type RoutesConfig struct {
+	Routes []RouteConfig `json:"routes"`
 }
 
 func loadConfig() Config {
-	return Config{
-		LambdaInvokeURL: getEnv("LAMBDA_INVOKE_URL", "http://localhost:9000/2015-03-31/functions/function/invocations"),
-		RouteTemplate:   getEnv("ROUTE_TEMPLATE", "/{proxy+}"),
-		Stage:           getEnv("STAGE", "$default"),
-		AccountID:       getEnv("ACCOUNT_ID", "123456789012"),
-		ApiID:           getEnv("API_ID", "local"),
-		ListenAddr:      getEnv("LISTEN_ADDR", ":3000"),
-		Debug:           getEnv("DEBUG", "false") == "true",
+	config := Config{
+		Stage:      getEnv("STAGE", "$default"),
+		AccountID:  getEnv("ACCOUNT_ID", "123456789012"),
+		ApiID:      getEnv("API_ID", "local"),
+		ListenAddr: getEnv("LISTEN_ADDR", ":3000"),
+		Debug:      getEnv("DEBUG", "false") == "true",
+		Routes:     []RouteConfig{},
 	}
+
+	// Tentar carregar rotas do arquivo JSON
+	routesFile := getEnv("ROUTES_FILE", "")
+	if routesFile != "" {
+		routes, err := loadRoutesFromFile(routesFile)
+		if err != nil {
+			log.Printf("⚠️  Warning: Failed to load routes from file %s: %v", routesFile, err)
+		} else {
+			config.Routes = routes
+		}
+	}
+
+	// Tentar carregar rotas do JSON inline (ROUTES env var)
+	routesJSON := getEnv("ROUTES", "")
+	if routesJSON != "" {
+		routes, err := loadRoutesFromJSON(routesJSON)
+		if err != nil {
+			log.Printf("⚠️  Warning: Failed to parse ROUTES env var: %v", err)
+		} else {
+			config.Routes = append(config.Routes, routes...)
+		}
+	}
+
+	// Fallback: usar LAMBDA_INVOKE_URL e ROUTE_TEMPLATE (modo legado/single route)
+	if len(config.Routes) == 0 {
+		lambdaURL := getEnv("LAMBDA_INVOKE_URL", "")
+		routeTemplate := getEnv("ROUTE_TEMPLATE", "")
+
+		if lambdaURL != "" {
+			if routeTemplate == "" {
+				routeTemplate = "/{proxy+}"
+			}
+			config.Routes = append(config.Routes, RouteConfig{
+				PathPrefix:    extractPathPrefix(routeTemplate),
+				RouteTemplate: routeTemplate,
+				LambdaURL:     lambdaURL,
+				Name:          "default",
+			})
+		}
+	}
+
+	// Se ainda não tiver rotas, usar default
+	if len(config.Routes) == 0 {
+		config.Routes = append(config.Routes, RouteConfig{
+			PathPrefix:    "/",
+			RouteTemplate: "/{proxy+}",
+			LambdaURL:     "http://localhost:9000/2015-03-31/functions/function/invocations",
+			Name:          "default",
+		})
+	}
+
+	return config
+}
+
+// loadRoutesFromFile carrega rotas de um arquivo JSON
+func loadRoutesFromFile(filepath string) ([]RouteConfig, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	return loadRoutesFromJSON(string(data))
+}
+
+// loadRoutesFromJSON carrega rotas de uma string JSON
+func loadRoutesFromJSON(jsonStr string) ([]RouteConfig, error) {
+	var routesConfig RoutesConfig
+	if err := json.Unmarshal([]byte(jsonStr), &routesConfig); err != nil {
+		// Tentar como array direto
+		var routes []RouteConfig
+		if err2 := json.Unmarshal([]byte(jsonStr), &routes); err2 != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+		return routes, nil
+	}
+	return routesConfig.Routes, nil
+}
+
+// extractPathPrefix extrai o prefixo do path de um template de rota
+func extractPathPrefix(template string) string {
+	// Encontrar a posição do primeiro parâmetro
+	paramIdx := strings.Index(template, "{")
+	if paramIdx == -1 {
+		return template
+	}
+
+	prefix := template[:paramIdx]
+	// Remover trailing slash se houver
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return "/"
+	}
+	return prefix
 }
 
 func getEnv(key, defaultValue string) string {
@@ -69,16 +178,16 @@ type APIGatewayV2HTTPRequest struct {
 }
 
 type APIGatewayV2HTTPRequestContext struct {
-	AccountID    string                                `json:"accountId"`
-	ApiID        string                                `json:"apiId"`
-	DomainName   string                                `json:"domainName"`
-	DomainPrefix string                                `json:"domainPrefix"`
-	HTTP         APIGatewayV2HTTPRequestContextHTTP    `json:"http"`
-	RequestID    string                                `json:"requestId"`
-	RouteKey     string                                `json:"routeKey"`
-	Stage        string                                `json:"stage"`
-	Time         string                                `json:"time"`
-	TimeEpoch    int64                                 `json:"timeEpoch"`
+	AccountID    string                             `json:"accountId"`
+	ApiID        string                             `json:"apiId"`
+	DomainName   string                             `json:"domainName"`
+	DomainPrefix string                             `json:"domainPrefix"`
+	HTTP         APIGatewayV2HTTPRequestContextHTTP `json:"http"`
+	RequestID    string                             `json:"requestId"`
+	RouteKey     string                             `json:"routeKey"`
+	Stage        string                             `json:"stage"`
+	Time         string                             `json:"time"`
+	TimeEpoch    int64                              `json:"timeEpoch"`
 }
 
 type APIGatewayV2HTTPRequestContextHTTP struct {
@@ -102,27 +211,79 @@ type LambdaResponse struct {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// PROXY HANDLER
+// MULTI-ROUTE PROXY HANDLER
 // ════════════════════════════════════════════════════════════════════════════════
 
-type ProxyHandler struct {
-	config       Config
-	httpClient   *http.Client
-	pathMatcher  *PathMatcher
+// RouteHandler representa um handler para uma rota específica
+type RouteHandler struct {
+	route       RouteConfig
+	pathMatcher *PathMatcher
 }
 
-func NewProxyHandler(config Config) *ProxyHandler {
-	return &ProxyHandler{
+// MultiRouteProxy é o handler principal que roteia para múltiplas Lambdas
+type MultiRouteProxy struct {
+	config     Config
+	httpClient *http.Client
+	routes     []*RouteHandler
+}
+
+func NewMultiRouteProxy(config Config) *MultiRouteProxy {
+	proxy := &MultiRouteProxy{
 		config: config,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		pathMatcher: NewPathMatcher(config.RouteTemplate),
+		routes: make([]*RouteHandler, 0, len(config.Routes)),
 	}
+
+	// Criar handlers para cada rota
+	for _, route := range config.Routes {
+		handler := &RouteHandler{
+			route:       route,
+			pathMatcher: NewPathMatcher(route.RouteTemplate),
+		}
+		proxy.routes = append(proxy.routes, handler)
+	}
+
+	// Ordenar rotas por especificidade (mais específicas primeiro)
+	// Rotas com prefixos mais longos têm prioridade
+	sort.Slice(proxy.routes, func(i, j int) bool {
+		return len(proxy.routes[i].route.PathPrefix) > len(proxy.routes[j].route.PathPrefix)
+	})
+
+	return proxy
 }
 
-func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// findRoute encontra a rota que melhor corresponde ao path da requisição
+func (p *MultiRouteProxy) findRoute(path string) *RouteHandler {
+	for _, handler := range p.routes {
+		prefix := handler.route.PathPrefix
+		// Verificar se o path começa com o prefixo da rota
+		if prefix == "/" || strings.HasPrefix(path, prefix) {
+			// Para prefixos não-root, verificar se é um match de segmento completo
+			if prefix != "/" && len(path) > len(prefix) {
+				// Garantir que o próximo caractere é '/' ou fim da string
+				nextChar := path[len(prefix)]
+				if nextChar != '/' {
+					continue
+				}
+			}
+			return handler
+		}
+	}
+	return nil
+}
+
+func (p *MultiRouteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+
+	// Encontrar a rota correspondente
+	handler := p.findRoute(r.URL.Path)
+	if handler == nil {
+		p.writeError(w, http.StatusNotFound, "No route matched for path: "+r.URL.Path)
+		log.Printf("❌ No route matched: %s %s\n", r.Method, r.URL.Path)
+		return
+	}
 
 	// Ler body da requisição
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -133,13 +294,14 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Construir evento API Gateway v2
-	event := p.buildEvent(r, bodyBytes)
+	event := p.buildEvent(r, bodyBytes, handler)
 
 	// Debug: imprimir evento gerado
 	if p.config.Debug {
 		eventJSON, _ := json.MarshalIndent(event, "", "  ")
 		log.Printf("═══════════════════════════════════════════════════════════════\n")
 		log.Printf("📥 INCOMING REQUEST: %s %s\n", r.Method, r.URL.String())
+		log.Printf("🎯 MATCHED ROUTE: %s → %s\n", handler.route.Name, handler.route.LambdaURL)
 		log.Printf("📤 GENERATED EVENT:\n%s\n", string(eventJSON))
 		log.Printf("═══════════════════════════════════════════════════════════════\n")
 	}
@@ -152,16 +314,17 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Invocar Lambda
-	lambdaResp, err := p.invokeLambda(eventJSON)
+	lambdaResp, err := p.invokeLambda(handler.route.LambdaURL, eventJSON)
 	if err != nil {
-		log.Printf("❌ Lambda invocation failed: %v", err)
+		log.Printf("❌ Lambda invocation failed [%s]: %v", handler.route.Name, err)
 		p.writeError(w, http.StatusBadGateway, fmt.Sprintf("Lambda invocation failed: %v", err))
 		return
 	}
 
 	// Debug: imprimir resposta da Lambda
 	if p.config.Debug {
-		log.Printf("📨 LAMBDA RESPONSE: StatusCode=%d, Body=%s\n", lambdaResp.StatusCode, lambdaResp.Body)
+		log.Printf("📨 LAMBDA RESPONSE [%s]: StatusCode=%d, Body=%s\n", 
+			handler.route.Name, lambdaResp.StatusCode, lambdaResp.Body)
 	}
 
 	// Escrever resposta para o cliente
@@ -169,10 +332,14 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Log de acesso
 	duration := time.Since(startTime)
-	log.Printf("✅ %s %s → %d (%v)\n", r.Method, r.URL.Path, lambdaResp.StatusCode, duration)
+	routeName := handler.route.Name
+	if routeName == "" {
+		routeName = handler.route.PathPrefix
+	}
+	log.Printf("✅ %s %s → %d [%s] (%v)\n", r.Method, r.URL.Path, lambdaResp.StatusCode, routeName, duration)
 }
 
-func (p *ProxyHandler) buildEvent(r *http.Request, body []byte) APIGatewayV2HTTPRequest {
+func (p *MultiRouteProxy) buildEvent(r *http.Request, body []byte, handler *RouteHandler) APIGatewayV2HTTPRequest {
 	now := time.Now().UTC()
 
 	// Extrair headers (lowercase)
@@ -202,8 +369,8 @@ func (p *ProxyHandler) buildEvent(r *http.Request, body []byte) APIGatewayV2HTTP
 		}
 	}
 
-	// Extrair path parameters usando o template
-	pathParams := p.pathMatcher.ExtractParams(r.URL.Path)
+	// Extrair path parameters usando o template da rota correspondente
+	pathParams := handler.pathMatcher.ExtractParams(r.URL.Path)
 
 	// Extrair source IP
 	sourceIP := extractSourceIP(r)
@@ -221,8 +388,8 @@ func (p *ProxyHandler) buildEvent(r *http.Request, body []byte) APIGatewayV2HTTP
 		domainPrefix = domainPrefix[:colonIdx]
 	}
 
-	// Construir routeKey
-	routeKey := fmt.Sprintf("%s %s", r.Method, p.config.RouteTemplate)
+	// Construir routeKey usando o template da rota correspondente
+	routeKey := fmt.Sprintf("%s %s", r.Method, handler.route.RouteTemplate)
 
 	// Construir evento
 	event := APIGatewayV2HTTPRequest{
@@ -275,8 +442,8 @@ func (p *ProxyHandler) buildEvent(r *http.Request, body []byte) APIGatewayV2HTTP
 	return event
 }
 
-func (p *ProxyHandler) invokeLambda(eventJSON []byte) (*LambdaResponse, error) {
-	req, err := http.NewRequest("POST", p.config.LambdaInvokeURL, bytes.NewReader(eventJSON))
+func (p *MultiRouteProxy) invokeLambda(lambdaURL string, eventJSON []byte) (*LambdaResponse, error) {
+	req, err := http.NewRequest("POST", lambdaURL, bytes.NewReader(eventJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -312,7 +479,7 @@ func (p *ProxyHandler) invokeLambda(eventJSON []byte) (*LambdaResponse, error) {
 	return &lambdaResp, nil
 }
 
-func (p *ProxyHandler) writeResponse(w http.ResponseWriter, resp *LambdaResponse) {
+func (p *MultiRouteProxy) writeResponse(w http.ResponseWriter, resp *LambdaResponse) {
 	// Definir headers da resposta
 	for key, value := range resp.Headers {
 		w.Header().Set(key, value)
@@ -336,7 +503,7 @@ func (p *ProxyHandler) writeResponse(w http.ResponseWriter, resp *LambdaResponse
 	}
 }
 
-func (p *ProxyHandler) writeError(w http.ResponseWriter, statusCode int, message string) {
+func (p *MultiRouteProxy) writeError(w http.ResponseWriter, statusCode int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -463,42 +630,67 @@ func main() {
 	// Banner
 	fmt.Println(`
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║     AWS API Gateway HTTP API v2 - Local Proxy                                 ║
+║     AWS API Gateway HTTP API v2 - Local Proxy (Multi-Route)                   ║
 ║     🚀 Zero Dependencies | Pure Go | Production Ready                         ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝`)
 
 	fmt.Printf(`
 📋 CONFIGURATION:
    ├─ Listen Address:    %s
-   ├─ Lambda URL:        %s
-   ├─ Route Template:    %s
    ├─ Stage:             %s
    ├─ Account ID:        %s
    ├─ API ID:            %s
-   └─ Debug Mode:        %v
+   ├─ Debug Mode:        %v
+   └─ Routes:            %d configured
 
-`, config.ListenAddr, config.LambdaInvokeURL, config.RouteTemplate, config.Stage, config.AccountID, config.ApiID, config.Debug)
+`, config.ListenAddr, config.Stage, config.AccountID, config.ApiID, config.Debug, len(config.Routes))
 
-	// Criar handler
-	handler := NewProxyHandler(config)
+	// Imprimir rotas configuradas
+	fmt.Println("📍 CONFIGURED ROUTES:")
+	for i, route := range config.Routes {
+		name := route.Name
+		if name == "" {
+			name = fmt.Sprintf("route-%d", i+1)
+		}
+		fmt.Printf("   %d. [%s]\n", i+1, name)
+		fmt.Printf("      ├─ Path Prefix:    %s\n", route.PathPrefix)
+		fmt.Printf("      ├─ Route Template: %s\n", route.RouteTemplate)
+		fmt.Printf("      └─ Lambda URL:     %s\n", route.LambdaURL)
+	}
+	fmt.Println()
+
+	// Criar handler multi-rota
+	proxy := NewMultiRouteProxy(config)
 
 	// Health check endpoint
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "healthy",
-			"proxy":  "aws-api-gateway-v2-local",
+		
+		routeNames := make([]string, len(config.Routes))
+		for i, route := range config.Routes {
+			if route.Name != "" {
+				routeNames[i] = route.Name
+			} else {
+				routeNames[i] = route.PathPrefix
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":      "healthy",
+			"proxy":       "aws-api-gateway-v2-local",
+			"routeCount":  len(config.Routes),
+			"routes":      routeNames,
 		})
 	})
 
 	// Proxy para todas as outras rotas
-	mux.Handle("/", handler)
+	mux.Handle("/", proxy)
 
 	// Iniciar servidor
 	log.Printf("🟢 Proxy listening on %s\n", config.ListenAddr)
-	log.Printf("📡 Forwarding to Lambda at %s\n", config.LambdaInvokeURL)
+	log.Printf("📡 Routing to %d Lambda function(s)\n", len(config.Routes))
 	log.Println("════════════════════════════════════════════════════════════════")
 
 	server := &http.Server{

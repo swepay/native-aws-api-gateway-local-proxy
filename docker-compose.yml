@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # Docker Compose - Stack Completa para Desenvolvimento Local
 # ═══════════════════════════════════════════════════════════════════════════════
-# 
+#
 # Inclui:
 # - API Gateway Local Proxy
 # - Lambda (exemplo usando imagem aws-lambda-rie)
@@ -12,7 +12,7 @@
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
-version: '3.8'
+version: "3.8"
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -42,7 +42,15 @@ services:
     networks:
       - proxy-network
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3000/health",
+        ]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -52,7 +60,7 @@ services:
   # Lambda Mock (exemplo - substitua pela sua Lambda real)
   # ─────────────────────────────────────────────────────────────────────────────
   # Este é um placeholder. Para usar com sua Lambda real:
-  # 
+  #
   # Opção 1: Lambda Python/Node.js com RIE
   #   docker run -p 9000:8080 \
   #     -v ~/.aws-lambda-rie:/aws-lambda \

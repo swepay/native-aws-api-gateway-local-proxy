@@ -20,6 +20,7 @@ Proxy HTTP local que simula fielmente o comportamento do **AWS API Gateway HTTP 
 - ✅ **Zero dependências externas** - Somente Go standard library
 - ✅ **Single binary** - Compilação simples, distribuição fácil
 - ✅ **Evento HTTP API v2** - Formato `"version": "2.0"` completo
+- ✅ **Multi-route support** - Um proxy para múltiplas Lambdas
 - ✅ **Path parameters** - Extração automática via template
 - ✅ **Headers lowercase** - Comportamento idêntico ao API Gateway real
 - ✅ **Preservação de body** - Sem alteração de encoding
@@ -93,6 +94,8 @@ docker-compose logs -f api-gateway-proxy
 
 Todas as configurações são via variáveis de ambiente:
 
+### Modo Single-Route (Simples)
+
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
 | `LAMBDA_INVOKE_URL` | URL do endpoint de invocação da Lambda | `http://localhost:9000/2015-03-31/functions/function/invocations` |
@@ -102,6 +105,131 @@ Todas as configurações são via variáveis de ambiente:
 | `API_ID` | API Gateway ID simulado | `local` |
 | `LISTEN_ADDR` | Endereço de escuta do proxy | `:3000` |
 | `DEBUG` | Modo debug (imprime eventos) | `false` |
+
+### Modo Multi-Route (Múltiplas Lambdas)
+
+| Variável | Descrição |
+|----------|-----------|
+| `ROUTES` | Configuração JSON das rotas (inline) |
+| `ROUTES_FILE` | Caminho para arquivo JSON de configuração |
+
+## 🔀 Multi-Route: Um Proxy, Múltiplas Lambdas
+
+O proxy suporta rotear diferentes prefixos de path para diferentes Lambdas, permitindo simular um API Gateway completo com múltiplos backends:
+
+```
+┌─────────────────┐      ┌──────────────────────────┐      ┌─────────────────┐
+│   HTTP Client   │      │   Multi-Route Proxy      │      │ Identity Lambda │
+│                 │ ──▶  │                          │ ──▶  │ (port 9001)     │
+│ /identity/...   │      │  /identity → :9001       │      └─────────────────┘
+│ /admin/...      │      │  /admin    → :9002       │      ┌─────────────────┐
+│ /openid/...     │      │  /openid   → :9003       │ ──▶  │  Admin Lambda   │
+└─────────────────┘      └──────────────────────────┘      │ (port 9002)     │
+                                                           └─────────────────┘
+                                                           ┌─────────────────┐
+                                                      ──▶  │  OpenID Lambda  │
+                                                           │ (port 9003)     │
+                                                           └─────────────────┘
+```
+
+### Configuração via JSON (Variável ROUTES)
+
+```bash
+export ROUTES='{
+  "routes": [
+    {
+      "pathPrefix": "/identity",
+      "routeTemplate": "/identity/v1/realms/{realm}/protocol/openid-connect/{action}",
+      "lambdaUrl": "http://localhost:9001/2015-03-31/functions/function/invocations",
+      "name": "identity"
+    },
+    {
+      "pathPrefix": "/admin",
+      "routeTemplate": "/admin/{proxy+}",
+      "lambdaUrl": "http://localhost:9002/2015-03-31/functions/function/invocations",
+      "name": "admin"
+    },
+    {
+      "pathPrefix": "/openid",
+      "routeTemplate": "/openid/{proxy+}",
+      "lambdaUrl": "http://localhost:9003/2015-03-31/functions/function/invocations",
+      "name": "openid"
+    },
+    {
+      "pathPrefix": "/",
+      "routeTemplate": "/{proxy+}",
+      "lambdaUrl": "http://localhost:9000/2015-03-31/functions/function/invocations",
+      "name": "default"
+    }
+  ]
+}'
+
+./proxy
+```
+
+### Configuração via Arquivo
+
+```bash
+# Criar arquivo de configuração
+cat > routes.json << 'EOF'
+{
+  "routes": [
+    {"pathPrefix": "/identity", "routeTemplate": "/identity/{proxy+}", "lambdaUrl": "http://localhost:9001/2015-03-31/functions/function/invocations", "name": "identity"},
+    {"pathPrefix": "/admin", "routeTemplate": "/admin/{proxy+}", "lambdaUrl": "http://localhost:9002/2015-03-31/functions/function/invocations", "name": "admin"},
+    {"pathPrefix": "/", "routeTemplate": "/{proxy+}", "lambdaUrl": "http://localhost:9000/2015-03-31/functions/function/invocations", "name": "default"}
+  ]
+}
+EOF
+
+# Executar com arquivo
+ROUTES_FILE=routes.json ./proxy
+```
+
+### Ordem de Prioridade das Rotas
+
+As rotas são automaticamente ordenadas por especificidade (prefixo mais longo primeiro):
+
+```
+1. /api/v1/users  (mais específico)
+2. /api/v1
+3. /api
+4. /             (fallback)
+```
+
+Isso garante que `/api/v1/users/123` seja roteado para a Lambda de users, não para a Lambda genérica de `/api`.
+
+### Docker Compose com Múltiplas Lambdas
+
+```yaml
+services:
+  api-gateway-proxy:
+    image: ghcr.io/swepay/native-aws-api-gateway-local-proxy:latest
+    ports:
+      - "3000:3000"
+    environment:
+      DEBUG: "true"
+      ROUTES: |
+        {
+          "routes": [
+            {"pathPrefix": "/identity", "routeTemplate": "/identity/{proxy+}", "lambdaUrl": "http://identity-lambda:8080/2015-03-31/functions/function/invocations", "name": "identity"},
+            {"pathPrefix": "/admin", "routeTemplate": "/admin/{proxy+}", "lambdaUrl": "http://admin-lambda:8080/2015-03-31/functions/function/invocations", "name": "admin"},
+            {"pathPrefix": "/", "routeTemplate": "/{proxy+}", "lambdaUrl": "http://default-lambda:8080/2015-03-31/functions/function/invocations", "name": "default"}
+          ]
+        }
+    depends_on:
+      - identity-lambda
+      - admin-lambda
+      - default-lambda
+
+  identity-lambda:
+    image: your-identity-lambda:latest
+
+  admin-lambda:
+    image: your-admin-lambda:latest
+
+  default-lambda:
+    image: your-default-lambda:latest
+```
 
 ### Exemplos de ROUTE_TEMPLATE
 
@@ -215,13 +343,17 @@ docker run -p 9000:8080 \
 ```
 main.go
 ├── Config              # Configuração via ENV
+├── RouteConfig         # Configuração de uma rota
 ├── APIGatewayV2*       # Structs do evento v2
 ├── LambdaResponse      # Struct da resposta
-├── ProxyHandler        # Handler HTTP principal
+├── MultiRouteProxy     # Handler HTTP principal
 │   ├── ServeHTTP()     # Entry point
+│   ├── findRoute()     # Encontra rota por prefix
 │   ├── buildEvent()    # Constrói evento v2
 │   ├── invokeLambda()  # Invoca Lambda via HTTP
 │   └── writeResponse() # Escreve resposta HTTP
+├── RouteHandler        # Handler por rota
+│   └── PathMatcher     # Extração de path params
 ├── PathMatcher         # Extração de path params
 │   └── ExtractParams() # Regex-based extraction
 └── main()              # Bootstrap
