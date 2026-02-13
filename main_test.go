@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -550,6 +551,278 @@ func TestMultiRouteProxy_MultiLambdaIntegration(t *testing.T) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
+// HELPER: Gerar JWT de teste (sem assinatura válida — apenas para testes)
+// ════════════════════════════════════════════════════════════════════════════════
+
+func buildTestJWT(claims map[string]interface{}) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payloadJSON, _ := json.Marshal(claims)
+	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
+	signature := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
+	return header + "." + payload + "." + signature
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TESTES DO JWT CLAIMS EXTRACTION
+// ════════════════════════════════════════════════════════════════════════════════
+
+func TestExtractJWTClaims_ValidBearerToken(t *testing.T) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub":   "user1",
+		"iss":   "https://auth.example.com",
+		"exp":   9999999999,
+		"roles": []string{"Admin", "RealmAdmin"},
+	})
+
+	authorizer := extractJWTClaims("Bearer " + token)
+
+	if authorizer == nil {
+		t.Fatal("Expected authorizer, got nil")
+	}
+	if authorizer.JWT == nil {
+		t.Fatal("Expected JWT, got nil")
+	}
+
+	claims := authorizer.JWT.Claims
+
+	if claims["sub"] != "user1" {
+		t.Errorf("Expected sub=user1, got %s", claims["sub"])
+	}
+	if claims["iss"] != "https://auth.example.com" {
+		t.Errorf("Expected iss=https://auth.example.com, got %s", claims["iss"])
+	}
+	// exp é number → deve ser serializado como JSON
+	if claims["exp"] != "9999999999" {
+		t.Errorf("Expected exp=9999999999, got %s", claims["exp"])
+	}
+	// roles é array → deve ser serializado como JSON string
+	if claims["roles"] != `["Admin","RealmAdmin"]` {
+		t.Errorf("Expected roles as JSON array string, got %s", claims["roles"])
+	}
+}
+
+func TestExtractJWTClaims_NoBearerPrefix(t *testing.T) {
+	authorizer := extractJWTClaims("Basic abc123")
+
+	if authorizer != nil {
+		t.Error("Expected nil for non-Bearer auth, got authorizer")
+	}
+}
+
+func TestExtractJWTClaims_EmptyHeader(t *testing.T) {
+	authorizer := extractJWTClaims("")
+
+	if authorizer != nil {
+		t.Error("Expected nil for empty header, got authorizer")
+	}
+}
+
+func TestExtractJWTClaims_InvalidJWTFormat(t *testing.T) {
+	// Apenas 2 segmentos (falta a assinatura)
+	authorizer := extractJWTClaims("Bearer header.payload")
+
+	if authorizer != nil {
+		t.Error("Expected nil for invalid JWT format (2 segments), got authorizer")
+	}
+}
+
+func TestExtractJWTClaims_InvalidBase64(t *testing.T) {
+	// Payload com base64 inválido
+	authorizer := extractJWTClaims("Bearer aaa.!!!invalid-base64!!!.ccc")
+
+	if authorizer != nil {
+		t.Error("Expected nil for invalid base64 payload, got authorizer")
+	}
+}
+
+func TestExtractJWTClaims_InvalidJSON(t *testing.T) {
+	// Payload decodifica mas não é JSON válido
+	notJSON := base64.RawURLEncoding.EncodeToString([]byte("this is not json"))
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
+
+	authorizer := extractJWTClaims("Bearer " + header + "." + notJSON + "." + sig)
+
+	if authorizer != nil {
+		t.Error("Expected nil for invalid JSON payload, got authorizer")
+	}
+}
+
+func TestExtractJWTClaims_WithScopes(t *testing.T) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub":   "user1",
+		"scope": "openid profile email",
+	})
+
+	authorizer := extractJWTClaims("Bearer " + token)
+
+	if authorizer == nil || authorizer.JWT == nil {
+		t.Fatal("Expected authorizer with JWT, got nil")
+	}
+
+	scopes := authorizer.JWT.Scopes
+	expectedScopes := []string{"openid", "profile", "email"}
+
+	if len(scopes) != len(expectedScopes) {
+		t.Fatalf("Expected %d scopes, got %d: %v", len(expectedScopes), len(scopes), scopes)
+	}
+	for i, s := range expectedScopes {
+		if scopes[i] != s {
+			t.Errorf("Expected scope[%d]=%s, got %s", i, s, scopes[i])
+		}
+	}
+}
+
+func TestExtractJWTClaims_WithScpClaim(t *testing.T) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub": "user1",
+		"scp": "read write",
+	})
+
+	authorizer := extractJWTClaims("Bearer " + token)
+
+	if authorizer == nil || authorizer.JWT == nil {
+		t.Fatal("Expected authorizer with JWT, got nil")
+	}
+
+	scopes := authorizer.JWT.Scopes
+	if len(scopes) != 2 || scopes[0] != "read" || scopes[1] != "write" {
+		t.Errorf("Expected scopes [read, write], got %v", scopes)
+	}
+}
+
+func TestExtractJWTClaims_CaseInsensitiveBearer(t *testing.T) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub": "user1",
+	})
+
+	// Testar lowercase "bearer"
+	authorizer := extractJWTClaims("bearer " + token)
+	if authorizer == nil {
+		t.Error("Expected authorizer for lowercase 'bearer', got nil")
+	}
+
+	// Testar mixed case "BEARER"
+	authorizer = extractJWTClaims("BEARER " + token)
+	if authorizer == nil {
+		t.Error("Expected authorizer for uppercase 'BEARER', got nil")
+	}
+
+	// Testar mixed case "BeArEr"
+	authorizer = extractJWTClaims("BeArEr " + token)
+	if authorizer == nil {
+		t.Error("Expected authorizer for mixed case 'BeArEr', got nil")
+	}
+}
+
+func TestExtractJWTClaims_NumericAndBoolClaims(t *testing.T) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub":            "user1",
+		"exp":            1234567890,
+		"iat":            1234567800,
+		"email_verified": true,
+		"login_count":    42,
+	})
+
+	authorizer := extractJWTClaims("Bearer " + token)
+
+	if authorizer == nil || authorizer.JWT == nil {
+		t.Fatal("Expected authorizer with JWT, got nil")
+	}
+
+	claims := authorizer.JWT.Claims
+
+	// Numbers → string
+	if claims["exp"] != "1234567890" {
+		t.Errorf("Expected exp=1234567890, got %s", claims["exp"])
+	}
+	if claims["iat"] != "1234567800" {
+		t.Errorf("Expected iat=1234567800, got %s", claims["iat"])
+	}
+	// Bool → string
+	if claims["email_verified"] != "true" {
+		t.Errorf("Expected email_verified=true, got %s", claims["email_verified"])
+	}
+	if claims["login_count"] != "42" {
+		t.Errorf("Expected login_count=42, got %s", claims["login_count"])
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TESTES DE INTEGRAÇÃO DO JWT NO BUILD EVENT
+// ════════════════════════════════════════════════════════════════════════════════
+
+func TestBuildEvent_WithAuthorizationHeader(t *testing.T) {
+	proxy := newTestProxy([]RouteConfig{
+		{PathPrefix: "/api", RouteTemplate: "/api/{proxy+}", LambdaURL: "http://localhost:9000", Name: "api"},
+	})
+	handler := proxy.findRoute("/api/test")
+
+	token := buildTestJWT(map[string]interface{}{
+		"sub":   "user123",
+		"scope": "openid profile",
+		"iss":   "https://auth.example.com",
+	})
+
+	req := httptest.NewRequest("GET", "/api/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	event := proxy.buildEvent(req, nil, handler)
+
+	if event.RequestContext.Authorizer == nil {
+		t.Fatal("Expected Authorizer in requestContext, got nil")
+	}
+	if event.RequestContext.Authorizer.JWT == nil {
+		t.Fatal("Expected JWT in Authorizer, got nil")
+	}
+
+	claims := event.RequestContext.Authorizer.JWT.Claims
+	if claims["sub"] != "user123" {
+		t.Errorf("Expected sub=user123, got %s", claims["sub"])
+	}
+	if claims["iss"] != "https://auth.example.com" {
+		t.Errorf("Expected iss=https://auth.example.com, got %s", claims["iss"])
+	}
+
+	scopes := event.RequestContext.Authorizer.JWT.Scopes
+	if len(scopes) != 2 || scopes[0] != "openid" || scopes[1] != "profile" {
+		t.Errorf("Expected scopes [openid, profile], got %v", scopes)
+	}
+}
+
+func TestBuildEvent_WithoutAuthorizationHeader(t *testing.T) {
+	proxy := newTestProxy([]RouteConfig{
+		{PathPrefix: "/api", RouteTemplate: "/api/{proxy+}", LambdaURL: "http://localhost:9000", Name: "api"},
+	})
+	handler := proxy.findRoute("/api/test")
+
+	req := httptest.NewRequest("GET", "/api/test", nil)
+	// Sem header Authorization
+
+	event := proxy.buildEvent(req, nil, handler)
+
+	if event.RequestContext.Authorizer != nil {
+		t.Error("Expected nil Authorizer when no Authorization header, got non-nil")
+	}
+}
+
+func TestBuildEvent_WithInvalidToken(t *testing.T) {
+	proxy := newTestProxy([]RouteConfig{
+		{PathPrefix: "/api", RouteTemplate: "/api/{proxy+}", LambdaURL: "http://localhost:9000", Name: "api"},
+	})
+	handler := proxy.findRoute("/api/test")
+
+	req := httptest.NewRequest("GET", "/api/test", nil)
+	req.Header.Set("Authorization", "Bearer invalid")
+
+	event := proxy.buildEvent(req, nil, handler)
+
+	if event.RequestContext.Authorizer != nil {
+		t.Error("Expected nil Authorizer for invalid token, got non-nil")
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
 // BENCHMARK
 // ════════════════════════════════════════════════════════════════════════════════
 
@@ -596,5 +869,23 @@ func BenchmarkMultiRouteProxy_RouteMatching(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		proxy.findRoute(paths[i%len(paths)])
+	}
+}
+
+func BenchmarkExtractJWTClaims(b *testing.B) {
+	token := buildTestJWT(map[string]interface{}{
+		"sub":   "user1",
+		"iss":   "https://auth.example.com",
+		"exp":   9999999999,
+		"iat":   1234567890,
+		"scope": "openid profile email",
+		"roles": []string{"Admin", "RealmAdmin"},
+	})
+
+	header := "Bearer " + token
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		extractJWTClaims(header)
 	}
 }
