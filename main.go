@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,16 +179,26 @@ type APIGatewayV2HTTPRequest struct {
 }
 
 type APIGatewayV2HTTPRequestContext struct {
-	AccountID    string                             `json:"accountId"`
-	ApiID        string                             `json:"apiId"`
-	DomainName   string                             `json:"domainName"`
-	DomainPrefix string                             `json:"domainPrefix"`
-	HTTP         APIGatewayV2HTTPRequestContextHTTP `json:"http"`
-	RequestID    string                             `json:"requestId"`
-	RouteKey     string                             `json:"routeKey"`
-	Stage        string                             `json:"stage"`
-	Time         string                             `json:"time"`
-	TimeEpoch    int64                              `json:"timeEpoch"`
+	AccountID    string                                    `json:"accountId"`
+	ApiID        string                                    `json:"apiId"`
+	Authorizer   *APIGatewayV2HTTPRequestContextAuthorizer `json:"authorizer,omitempty"`
+	DomainName   string                                    `json:"domainName"`
+	DomainPrefix string                                    `json:"domainPrefix"`
+	HTTP         APIGatewayV2HTTPRequestContextHTTP        `json:"http"`
+	RequestID    string                                    `json:"requestId"`
+	RouteKey     string                                    `json:"routeKey"`
+	Stage        string                                    `json:"stage"`
+	Time         string                                    `json:"time"`
+	TimeEpoch    int64                                     `json:"timeEpoch"`
+}
+
+type APIGatewayV2HTTPRequestContextAuthorizer struct {
+	JWT *APIGatewayV2HTTPRequestContextJWT `json:"jwt,omitempty"`
+}
+
+type APIGatewayV2HTTPRequestContextJWT struct {
+	Claims map[string]string `json:"claims,omitempty"`
+	Scopes []string          `json:"scopes,omitempty"`
 }
 
 type APIGatewayV2HTTPRequestContextHTTP struct {
@@ -419,6 +430,17 @@ func (p *MultiRouteProxy) buildEvent(r *http.Request, body []byte, handler *Rout
 		IsBase64Encoded: false,
 	}
 
+	// Extract JWT Authorizer claims from Authorization header (simulates AWS API Gateway JWT Authorizer)
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		if authorizer := extractJWTClaims(authHeader); authorizer != nil {
+			event.RequestContext.Authorizer = authorizer
+			if p.config.Debug {
+				log.Printf("🔑 JWT claims extracted: %d claims, %d scopes\n",
+					len(authorizer.JWT.Claims), len(authorizer.JWT.Scopes))
+			}
+		}
+	}
+
 	// Adicionar cookies se existirem
 	if len(cookies) > 0 {
 		event.Cookies = cookies
@@ -582,6 +604,79 @@ func (pm *PathMatcher) ExtractParams(path string) map[string]string {
 // ════════════════════════════════════════════════════════════════════════════════
 // FUNÇÕES AUXILIARES
 // ════════════════════════════════════════════════════════════════════════════════
+
+// extractJWTClaims extracts JWT claims from an Authorization header.
+// Simulates AWS API Gateway JWT Authorizer behavior:
+// - Decodes the JWT payload (no signature validation — local proxy trusts the token)
+// - Converts all claim values to strings
+// - Extracts scopes from "scope" or "scp" claim (space-delimited)
+// Returns nil silently if anything fails (missing header, bad format, invalid base64/JSON).
+func extractJWTClaims(authHeader string) *APIGatewayV2HTTPRequestContextAuthorizer {
+	// Verificar se começa com "Bearer " (case-insensitive)
+	if len(authHeader) < 7 || !strings.EqualFold(authHeader[:7], "bearer ") {
+		return nil
+	}
+
+	token := authHeader[7:]
+
+	// JWT deve ter exatamente 3 segmentos: header.payload.signature
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+
+	// Decodificar payload (segundo segmento) com base64url sem padding
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+
+	// Parsear JSON do payload
+	var rawClaims map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &rawClaims); err != nil {
+		return nil
+	}
+
+	// Converter todos os valores para string
+	claims := make(map[string]string, len(rawClaims))
+	for key, value := range rawClaims {
+		switch v := value.(type) {
+		case string:
+			claims[key] = v
+		default:
+			// Numbers, bools, arrays, objects → serialize to JSON/fmt
+			jsonBytes, err := json.Marshal(v)
+			if err != nil {
+				claims[key] = fmt.Sprintf("%v", v)
+			} else {
+				claims[key] = string(jsonBytes)
+			}
+		}
+	}
+
+	// Extrair scopes da claim "scope" ou "scp" (split por espaço)
+	var scopes []string
+	scopeValue := ""
+	if s, ok := rawClaims["scope"]; ok {
+		if str, ok := s.(string); ok {
+			scopeValue = str
+		}
+	} else if s, ok := rawClaims["scp"]; ok {
+		if str, ok := s.(string); ok {
+			scopeValue = str
+		}
+	}
+	if scopeValue != "" {
+		scopes = strings.Split(scopeValue, " ")
+	}
+
+	return &APIGatewayV2HTTPRequestContextAuthorizer{
+		JWT: &APIGatewayV2HTTPRequestContextJWT{
+			Claims: claims,
+			Scopes: scopes,
+		},
+	}
+}
 
 func extractSourceIP(r *http.Request) string {
 	// Verificar X-Forwarded-For
