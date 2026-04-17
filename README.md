@@ -27,6 +27,46 @@ Proxy HTTP local que simula fielmente o comportamento do **AWS API Gateway HTTP 
 - ✅ **Modo debug** - Visualização do evento gerado
 - ✅ **Docker ready** - Imagem mínima (~10MB)
 - ✅ **Health check** - Endpoint `/health` incluso
+- ✅ **Security middleware** - Limite de payload, CORS whitelist, auth-header gate
+
+## 🛡 Security Middleware
+
+A partir da v1.x (F-SEC-10 do Swepay `GAPS_ROADMAP.md`), todas as requisições passam por um middleware de segurança configurável via variáveis de ambiente. Defaults são permissivos (dev-friendly); produção deve restringir.
+
+| Variável | Default | Efeito |
+| --- | --- | --- |
+| `MAX_BODY_BYTES` | `6291456` (6 MiB) | Rejeita requests com `Content-Length` acima do valor (HTTP 413). Também corta o body lido em chunks. Alinhado com o limite de payload do AWS API Gateway HTTP API v2. |
+| `CORS_ALLOWED_ORIGINS` | vazio (aceita tudo) | Lista CSV de origins permitidas (`https://app.swepay.com.br,https://admin.swepay.com.br`). Se presente, requests com `Origin` fora da lista recebem HTTP 403. Use `*` para aceitar explicitamente qualquer origin. |
+| `REQUIRE_AUTH_HEADER` | `false` | Se `true`, qualquer request sem header `Authorization` recebe HTTP 401. Não valida o conteúdo do header — só a presença. |
+
+**Exemplo — modo produção-leaning:**
+
+```bash
+docker run -p 3000:3000 \
+  -e MAX_BODY_BYTES=1048576 \
+  -e CORS_ALLOWED_ORIGINS=https://app.swepay.com.br \
+  -e REQUIRE_AUTH_HEADER=true \
+  -e ROUTES_FILE=/etc/proxy/routes.json \
+  -v $(pwd)/routes.json:/etc/proxy/routes.json \
+  ghcr.io/swepay/native-aws-api-gateway-local-proxy:latest
+```
+
+**Exemplo — modo dev (defaults):**
+
+```bash
+# Sem env vars extras - aceita tudo dentro do limite de 6 MiB.
+docker run -p 3000:3000 ghcr.io/swepay/native-aws-api-gateway-local-proxy:latest
+```
+
+**Respostas de erro** seguem o formato `application/json`:
+
+```json
+{"error": "Content-Length 7000000 exceeds MAX_BODY_BYTES 6291456", "status": 413}
+{"error": "origin \"https://evil.example.com\" not in CORS_ALLOWED_ORIGINS", "status": 403}
+{"error": "missing Authorization header (REQUIRE_AUTH_HEADER=true)", "status": 401}
+```
+
+Ordem de rejeição: **auth-header > origin > body-size**. Testes cobrem cada cenário em `security_test.go`.
 
 ## 📋 Requisitos
 
