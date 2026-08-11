@@ -783,14 +783,20 @@ func main() {
 	// Proxy para todas as outras rotas
 	mux.Handle("/", proxy)
 
+	// Security middleware (F-SEC-10): max body size, CORS whitelist, auth-header gate.
+	secCfg := loadSecurityConfig()
+	handler := securityMiddleware(mux, secCfg)
+
 	// Iniciar servidor
 	log.Printf("🟢 Proxy listening on %s\n", config.ListenAddr)
 	log.Printf("📡 Routing to %d Lambda function(s)\n", len(config.Routes))
+	log.Printf("🛡  Security: max_body=%d bytes, cors_allowlist=%v, require_auth=%v\n",
+		secCfg.MaxBodyBytes, secCfg.CORSAllowedOrigins, secCfg.RequireAuthHeader)
 	log.Println("════════════════════════════════════════════════════════════════")
 
 	server := &http.Server{
 		Addr:         config.ListenAddr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

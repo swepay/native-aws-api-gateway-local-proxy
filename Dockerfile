@@ -20,7 +20,7 @@ COPY go.mod ./
 RUN go mod download
 
 # Copiar código fonte
-COPY main.go ./
+COPY *.go ./
 
 # Build do binário
 # CGO_ENABLED=0 para binário estático
@@ -28,7 +28,7 @@ COPY main.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s -X main.version=1.0.0" \
     -o /app/proxy \
-    main.go
+    .
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Stage 2: Runtime (imagem mínima)

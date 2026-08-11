@@ -123,7 +123,7 @@ jobs:
               run: |
                   go build -ldflags="-w -s -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }}" \
                     -o proxy-${{ matrix.suffix }} \
-                    main.go
+                    .
 
             - name: Upload artifact
               uses: actions/upload-artifact@v4
