@@ -19,8 +19,10 @@ COPY go.mod ./
 # Download de dependências (nenhuma neste caso, mas boa prática)
 RUN go mod download
 
-# Copiar código fonte
-COPY main.go ./
+# Copiar código fonte — todos os arquivos .go do package main (main.go sozinho
+# parou de bastar quando authorizer.go virou um arquivo próprio; "go build main.go"
+# ignora silenciosamente os demais .go do diretório, diferente de "go build .").
+COPY *.go ./
 
 # Build do binário
 # CGO_ENABLED=0 para binário estático
@@ -28,7 +30,7 @@ COPY main.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s -X main.version=1.0.0" \
     -o /app/proxy \
-    main.go
+    .
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Stage 2: Runtime (imagem mínima)

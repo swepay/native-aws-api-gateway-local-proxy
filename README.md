@@ -43,7 +43,7 @@ git clone https://github.com/swepay/native-aws-api-gateway-local-proxy.git
 cd native-aws-api-gateway-local-proxy
 
 # Build
-go build -o proxy main.go
+go build -o proxy .
 
 # Executar
 ./proxy
@@ -296,6 +296,58 @@ O proxy gera este evento (formato API Gateway HTTP API v2):
 }
 ```
 
+## 🔐 Lambda Authorizer (rotas protegidas)
+
+Por padrão (`authorizerUrl` ausente), o proxy decodifica o JWT do header `Authorization`
+inline (`extractJWTClaims`) e popula `requestContext.authorizer.jwt.claims` — uma simulação
+aproximada, sem chamar nenhum Lambda Authorizer. Esse é o comportamento histórico do proxy e
+continua sendo o default para manter compatibilidade com todo produto que já o consome.
+
+Para uma rota protegida por **AWS::ApiGatewayV2::Authorizer** do tipo `REQUEST` na AWS real
+(`AuthorizationType: CUSTOM` no SAM/CFN), configure `authorizerUrl` nessa rota:
+
+```json
+{
+  "pathPrefix": "/admin",
+  "routeTemplate": "/admin/{proxy+}",
+  "lambdaUrl": "http://lambda-admin:8080/2015-03-31/functions/function/invocations",
+  "authorizerUrl": "http://lambda-authorizer:8080/2015-03-31/functions/function/invocations",
+  "name": "admin"
+}
+```
+
+Com `authorizerUrl` configurado, o proxy passa a:
+
+1. Se a requisição não tiver header `Authorization` (o único `identitySource` que o proxy
+   simula, equivalente a `IdentitySource: ["$request.header.Authorization"]` no
+   `AWS::ApiGatewayV2::Authorizer`), responder `401 {"message": "Unauthorized"}`
+   **sem invocar o Lambda** — o API Gateway real nunca chama um REQUEST authorizer quando
+   nenhum `identitySource` configurado está presente.
+2. Caso contrário, montar um evento REQUEST authorizer, payload format `2.0`
+   (`version`, `type: "REQUEST"`, `routeArn`, `identitySource`, `routeKey`, `rawPath`,
+   `rawQueryString`, `headers`, `queryStringParameters`, `pathParameters`, `requestContext`) e
+   invocar o Lambda em `authorizerUrl` — **antes** de invocar `lambdaUrl`, assim como o API
+   Gateway real faz para rotas `AuthorizationType: CUSTOM`.
+3. Interpretar a resposta no formato *simple response*
+   (`{"isAuthorized": bool, "context": {...}}`, `EnableSimpleResponses: true`).
+   - `isAuthorized: false` → responde `403 {"message": "Forbidden"}` e **nunca** invoca
+     `lambdaUrl`.
+   - Erro de rede, timeout, HTTP não-200 ou corpo malformado (authorizer indisponível) →
+     responde `500 {"message": "Internal Server Error"}` e **nunca** invoca `lambdaUrl` —
+     mesmo comportamento do API Gateway quando o Lambda Authorizer falha.
+   - `isAuthorized: true` → injeta o `context` retornado em
+     `requestContext.authorizer.lambda` do evento enviado a `lambdaUrl`, em vez de
+     `requestContext.authorizer.jwt` (o inline decode não roda para rotas com
+     `authorizerUrl`). `NativeLambdaRouter` (v2.1.0+) já lê `authorizer.lambda` como
+     fallback de `authorizer.jwt`, então handlers não precisam mudar nada.
+
+Isso resolve o caso em que o Lambda Authorizer injeta claims derivadas (ex.: `realmId`
+resolvido a partir do `kid` da assinatura, que o JWT por si só não garante) — informação que o
+inline decode nunca teve, porque nunca chamou o Authorizer de verdade
+(native-guard-backend#120).
+
+Rotas sem `authorizerUrl` continuam no comportamento legado, sem nenhuma mudança.
+
 ## 🧪 Testando
 
 ### Com Lambda Mock (incluída)
@@ -375,19 +427,19 @@ main.go
 ### Linux AMD64
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o proxy main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o proxy .
 ```
 
 ### Linux ARM64 (Graviton)
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o proxy main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o proxy .
 ```
 
 ### Windows
 
 ```bash
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o proxy.exe main.go
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o proxy.exe .
 ```
 
 ### Docker (Multi-arch)

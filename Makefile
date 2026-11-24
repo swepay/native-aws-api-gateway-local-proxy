@@ -16,25 +16,25 @@ GO_VERSION=1.21
 ## build: Compila o binário para a plataforma atual
 build:
 	@echo "🔨 Building $(BINARY_NAME)..."
-	go build -o $(BINARY_NAME) main.go
+	go build -o $(BINARY_NAME) .
 	@echo "✅ Build complete: $(BINARY_NAME)"
 
 ## build-linux: Compila para Linux AMD64
 build-linux:
 	@echo "🔨 Building for Linux AMD64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o $(BINARY_NAME)-linux-amd64 main.go
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o $(BINARY_NAME)-linux-amd64 .
 	@echo "✅ Build complete: $(BINARY_NAME)-linux-amd64"
 
 ## build-linux-arm: Compila para Linux ARM64 (Graviton)
 build-linux-arm:
 	@echo "🔨 Building for Linux ARM64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o $(BINARY_NAME)-linux-arm64 main.go
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o $(BINARY_NAME)-linux-arm64 .
 	@echo "✅ Build complete: $(BINARY_NAME)-linux-arm64"
 
 ## build-windows: Compila para Windows
 build-windows:
 	@echo "🔨 Building for Windows..."
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o $(BINARY_NAME).exe main.go
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o $(BINARY_NAME).exe .
 	@echo "✅ Build complete: $(BINARY_NAME).exe"
 
 ## build-all: Compila para todas as plataformas
