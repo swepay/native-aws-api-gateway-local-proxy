@@ -104,6 +104,58 @@ func TestAuthorizer_Allowed_InjectsLambdaContextIntoDownstreamEvent(t *testing.T
 	}
 }
 
+// TestAuthorizer_NoAuthorizationHeader_Returns401WithoutInvokingAuthorizer is a
+// regression test for AWS's actual Lambda Authorizer contract: API Gateway
+// never invokes a REQUEST authorizer when none of its configured identity
+// sources (here, the Authorization header) are present on the request — it
+// short-circuits with 401 before any Lambda runs. Conflating this with the
+// deny path (403) breaks every "no Bearer token" test written against real
+// AWS semantics (e.g. native-guard-backend's AdminAuthorizationCodeIssuanceTests).
+func TestAuthorizer_NoAuthorizationHeader_Returns401WithoutInvokingAuthorizer(t *testing.T) {
+	var authorizerCalls, downstreamCalls int32
+
+	authorizerMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&authorizerCalls, 1)
+		w.WriteHeader(200)
+	}))
+	defer authorizerMock.Close()
+
+	downstreamMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&downstreamCalls, 1)
+		w.WriteHeader(200)
+	}))
+	defer downstreamMock.Close()
+
+	proxy := newTestProxy([]RouteConfig{
+		{
+			PathPrefix:    "/admin",
+			RouteTemplate: "/admin/{proxy+}",
+			LambdaURL:     downstreamMock.URL,
+			AuthorizerURL: authorizerMock.URL,
+			Name:          "admin",
+		},
+	})
+
+	req := httptest.NewRequest("POST", "/admin/v1/realms/x/authorization-codes", nil)
+	// Deliberately no Authorization header.
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status 401, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Unauthorized") {
+		t.Errorf("Expected body to mention Unauthorized, got %s", w.Body.String())
+	}
+	if atomic.LoadInt32(&authorizerCalls) != 0 {
+		t.Errorf("Expected the authorizer Lambda NOT to be invoked without an Authorization header, got %d call(s)", authorizerCalls)
+	}
+	if atomic.LoadInt32(&downstreamCalls) != 0 {
+		t.Errorf("Expected downstream Lambda NOT to be invoked without an Authorization header, got %d call(s)", downstreamCalls)
+	}
+}
+
 func TestAuthorizer_Denied_DoesNotInvokeDownstreamLambda(t *testing.T) {
 	var downstreamCalls int32
 
@@ -212,6 +264,7 @@ func TestAuthorizer_MalformedResponse_Returns500(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("GET", "/admin/v1/realms", nil)
+	req.Header.Set("Authorization", "Bearer whatever")
 	w := httptest.NewRecorder()
 
 	proxy.ServeHTTP(w, req)

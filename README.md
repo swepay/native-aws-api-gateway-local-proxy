@@ -318,12 +318,17 @@ Para uma rota protegida por **AWS::ApiGatewayV2::Authorizer** do tipo `REQUEST` 
 
 Com `authorizerUrl` configurado, o proxy passa a:
 
-1. Montar um evento REQUEST authorizer, payload format `2.0`
+1. Se a requisição não tiver header `Authorization` (o único `identitySource` que o proxy
+   simula, equivalente a `IdentitySource: ["$request.header.Authorization"]` no
+   `AWS::ApiGatewayV2::Authorizer`), responder `401 {"message": "Unauthorized"}`
+   **sem invocar o Lambda** — o API Gateway real nunca chama um REQUEST authorizer quando
+   nenhum `identitySource` configurado está presente.
+2. Caso contrário, montar um evento REQUEST authorizer, payload format `2.0`
    (`version`, `type: "REQUEST"`, `routeArn`, `identitySource`, `routeKey`, `rawPath`,
    `rawQueryString`, `headers`, `queryStringParameters`, `pathParameters`, `requestContext`) e
    invocar o Lambda em `authorizerUrl` — **antes** de invocar `lambdaUrl`, assim como o API
    Gateway real faz para rotas `AuthorizationType: CUSTOM`.
-2. Interpretar a resposta no formato *simple response*
+3. Interpretar a resposta no formato *simple response*
    (`{"isAuthorized": bool, "context": {...}}`, `EnableSimpleResponses: true`).
    - `isAuthorized: false` → responde `403 {"message": "Forbidden"}` e **nunca** invoca
      `lambdaUrl`.

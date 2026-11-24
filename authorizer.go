@@ -73,12 +73,28 @@ type AuthorizerInvokeResponse struct {
 
 // authorize invokes handler.route.AuthorizerURL for the given request/event,
 // writes the appropriate HTTP response and returns false when the caller
-// must stop (denied or authorizer unavailable/malformed) — mirroring how API
-// Gateway itself never reaches the downstream Lambda in those cases. On
-// success, it injects the authorizer's context into event's
+// must stop (no identity source, denied, or authorizer unavailable/malformed)
+// — mirroring how API Gateway itself never reaches the downstream Lambda in
+// those cases. On success, it injects the authorizer's context into event's
 // requestContext.authorizer.lambda (what NativeLambdaRouter reads as a
 // fallback to requestContext.authorizer.jwt) and returns true.
 func (p *MultiRouteProxy) authorize(w http.ResponseWriter, handler *RouteHandler, event *APIGatewayV2HTTPRequest) bool {
+	// API Gateway never even invokes a REQUEST Lambda Authorizer when none of
+	// its configured identity sources are present on the request — it
+	// short-circuits with 401 Unauthorized before any Lambda runs. Our only
+	// identity source, mirroring the authorizer's AWS::ApiGatewayV2::Authorizer
+	// config (IdentitySource: ["$request.header.Authorization"]), is the
+	// Authorization header. Skipping this check would turn "no token at all"
+	// into a 403 (the deny path below), which is wrong on real AWS and breaks
+	// any test asserting 401 for an anonymous caller.
+	if authHeader, ok := event.Headers["authorization"]; !ok || authHeader == "" {
+		if p.config.Debug {
+			log.Printf("🔒 No identitySource (Authorization header) [%s]: %s %s\n", handler.route.Name, event.RequestContext.HTTP.Method, event.RawPath)
+		}
+		writeAuthorizerResult(w, http.StatusUnauthorized, "Unauthorized")
+		return false
+	}
+
 	authResp, err := p.invokeAuthorizer(handler.route.AuthorizerURL, *event)
 	if err != nil {
 		log.Printf("❌ Authorizer invocation failed [%s]: %v", handler.route.Name, err)
