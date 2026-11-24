@@ -43,7 +43,7 @@ git clone https://github.com/swepay/native-aws-api-gateway-local-proxy.git
 cd native-aws-api-gateway-local-proxy
 
 # Build
-go build -o proxy main.go
+go build -o proxy .
 
 # Executar
 ./proxy
@@ -427,19 +427,19 @@ main.go
 ### Linux AMD64
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o proxy main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o proxy .
 ```
 
 ### Linux ARM64 (Graviton)
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o proxy main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o proxy .
 ```
 
 ### Windows
 
 ```bash
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o proxy.exe main.go
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o proxy.exe .
 ```
 
 ### Docker (Multi-arch)
