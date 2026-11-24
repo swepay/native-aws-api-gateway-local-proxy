@@ -28,6 +28,7 @@ type Config struct {
 	Stage      string
 	AccountID  string
 	ApiID      string
+	Region     string
 	ListenAddr string
 	Debug      bool
 	Routes     []RouteConfig
@@ -43,6 +44,15 @@ type RouteConfig struct {
 	LambdaURL string `json:"lambdaUrl"`
 	// Name é um nome amigável para a rota (opcional, para logs)
 	Name string `json:"name,omitempty"`
+	// AuthorizerURL é a URL de invocação do Lambda Authorizer (REQUEST type,
+	// payload format 2.0, simple response) desta rota. Opt-in por rota: quando
+	// vazio (default), o proxy mantém o comportamento legado — decodifica o
+	// JWT inline (extractJWTClaims) sem chamar nenhum Authorizer, como fazem
+	// hoje os demais produtos que consomem este proxy. Quando preenchido, o
+	// proxy invoca o Authorizer e injeta o `context` retornado em
+	// requestContext.authorizer.lambda, fiel ao que o API Gateway real faz
+	// para rotas com AuthorizationType: CUSTOM (issue native-guard-backend#120).
+	AuthorizerURL string `json:"authorizerUrl,omitempty"`
 }
 
 // RoutesConfig é o formato do arquivo JSON de configuração de rotas
@@ -55,6 +65,7 @@ func loadConfig() Config {
 		Stage:      getEnv("STAGE", "$default"),
 		AccountID:  getEnv("ACCOUNT_ID", "123456789012"),
 		ApiID:      getEnv("API_ID", "local"),
+		Region:     getEnv("AWS_REGION", "sa-east-1"),
 		ListenAddr: getEnv("LISTEN_ADDR", ":3000"),
 		Debug:      getEnv("DEBUG", "false") == "true",
 		Routes:     []RouteConfig{},
@@ -194,6 +205,13 @@ type APIGatewayV2HTTPRequestContext struct {
 
 type APIGatewayV2HTTPRequestContextAuthorizer struct {
 	JWT *APIGatewayV2HTTPRequestContextJWT `json:"jwt,omitempty"`
+	// Lambda carries the `context` map a REQUEST/CUSTOM Lambda Authorizer
+	// returned (simple response format). Mirrors what AWS API Gateway puts
+	// in requestContext.authorizer.lambda for routes protected by a Lambda
+	// Authorizer — distinct from JWT above, which is only populated for
+	// routes using a native JWT authorizer (or, locally, the legacy inline
+	// decode in extractJWTClaims).
+	Lambda map[string]interface{} `json:"lambda,omitempty"`
 }
 
 type APIGatewayV2HTTPRequestContextJWT struct {
@@ -306,6 +324,18 @@ func (p *MultiRouteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Construir evento API Gateway v2
 	event := p.buildEvent(r, bodyBytes, handler)
+
+	// Rota com Lambda Authorizer configurado: chama o Authorizer como o API
+	// Gateway real faria para uma rota com AuthorizationType: CUSTOM, antes
+	// de invocar a Lambda de destino. Nega com 401/403 e nunca invoca a
+	// Lambda de destino quando o Authorizer recusa ou está indisponível
+	// (native-guard-backend#120).
+	if handler.route.AuthorizerURL != "" {
+		if !p.authorize(w, handler, &event) {
+			return
+		}
+		// authorize() preenche event.RequestContext.Authorizer.Lambda em caso de sucesso.
+	}
 
 	// Debug: imprimir evento gerado
 	if p.config.Debug {
@@ -430,13 +460,19 @@ func (p *MultiRouteProxy) buildEvent(r *http.Request, body []byte, handler *Rout
 		IsBase64Encoded: false,
 	}
 
-	// Extract JWT Authorizer claims from Authorization header (simulates AWS API Gateway JWT Authorizer)
-	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-		if authorizer := extractJWTClaims(authHeader); authorizer != nil {
-			event.RequestContext.Authorizer = authorizer
-			if p.config.Debug {
-				log.Printf("🔑 JWT claims extracted: %d claims, %d scopes\n",
-					len(authorizer.JWT.Claims), len(authorizer.JWT.Scopes))
+	// Extract JWT Authorizer claims from Authorization header (simulates AWS API Gateway JWT Authorizer).
+	// Skipped for routes with their own AuthorizerURL: those go through invokeAuthorizer
+	// in ServeHTTP instead, which is what actually sets requestContext.authorizer for them
+	// (native-guard-backend#120 — this inline decode never called a Lambda Authorizer, so
+	// Authorizer-injected claims like realmId were never present downstream).
+	if handler.route.AuthorizerURL == "" {
+		if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+			if authorizer := extractJWTClaims(authHeader); authorizer != nil {
+				event.RequestContext.Authorizer = authorizer
+				if p.config.Debug {
+					log.Printf("🔑 JWT claims extracted: %d claims, %d scopes\n",
+						len(authorizer.JWT.Claims), len(authorizer.JWT.Scopes))
+				}
 			}
 		}
 	}
